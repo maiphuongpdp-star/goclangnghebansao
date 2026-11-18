@@ -257,10 +257,12 @@ stats = load_stats()
 # Khởi tạo Session State
 if "chat_history" not in st.session_state:
   st.session_state["chat_history"] = []
-if "show_follow_up" not in st.session_state:
-  st.session_state["show_follow_up"] = False
 if "selected_emotion_prompt" not in st.session_state:
   st.session_state["selected_emotion_prompt"] = ""
+if "feedback" not in st.session_state:
+  st.session_state["feedback"] = None  # None / "yes" / "no" cho câu chuyện hiện tại
+if "fu_counter" not in st.session_state:
+  st.session_state["fu_counter"] = 0
 
 # ----------------- 2. SYSTEM PROMPT: CÔ TƯ PHÙNG (CHUẨN HÓA XƯNG HÔ & PHÂN BIỆT GIA CẢNH) -----------------
 SYSTEM_PROMPT = """
@@ -533,14 +535,31 @@ api_key = os.environ.get("GEMINI_API_KEY") or st.secrets.get(
 )
 client = genai.Client(api_key=api_key) if api_key else None
 
+CANDIDATE_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+]
 
-def get_ai_reply(prompt, grade, topic):
-  candidate_models = [
-      "gemini-3.6-flash",
-      "gemini-3.5-flash-lite",
-      "gemini-3.8-flash",
-  ]
-  full_user_context = (
+# Giữ lượt đầu (bối cảnh gốc) + tối đa 16 tin nhắn gần nhất để không vượt giới hạn
+MAX_RECENT_MESSAGES = 16
+
+FOLLOW_UP_REMINDER = (
+    "\n\n(GHI CHÚ HỆ THỐNG CHO CÔ TƯ PHÙNG - học sinh không nhìn thấy dòng này:"
+    " Đây là lời học sinh nói tiếp trong CÙNG câu chuyện ở trên. Hãy nhớ và nối"
+    " tiếp những gì cô trò mình đã nói, không lặp lại nguyên văn lời khuyên cũ."
+    " Trả lời tự nhiên, ngắn gọn, ấm áp như đang trò chuyện; KHÔNG cần chia 3"
+    " phần [PHAN_1]/[PHAN_2]/[PHAN_3]. Xưng 'Cô' - gọi 'Con' (dùng 'Cô trò"
+    " mình'). Chỉ rõ từng bước giữ bí mật, an toàn cho con. Không tự ý nhắc"
+    " chuyện ba mẹ đi biển nếu con không nhắc. Nếu có dấu hiệu nguy hiểm (đánh"
+    " nhau, bị đe dọa, tự làm hại bản thân) phải hướng dẫn ngay SOP: báo thầy"
+    " Thành/bác bảo vệ/người lớn tin cậy ngay lập tức.)"
+)
+
+
+def build_first_turn(prompt, grade, topic):
+  """Gói lời tâm sự đầu tiên kèm bối cảnh và yêu cầu trả lời 3 phần."""
+  return (
       f"HỌC SINH THCS PHAN ĐÌNH PHÙNG ({grade.upper()}):\n"
       f"- Nhóm vấn đề: {topic}\n"
       f"- Lời tâm sự: {prompt}\n\n"
@@ -556,11 +575,31 @@ def get_ai_reply(prompt, grade, topic):
       " chỉ dẫn ngay SOP: hô hoán can ngăn, cử bạn đi báo thầy Thành/bác bảo vệ"
       " ngay lập tức."
   )
-  for m in candidate_models:
+
+
+def history_to_contents(history):
+  """Đổi chat_history thành danh sách lượt hội thoại đúng chuẩn Gemini.
+
+  Mỗi tin nhắn có 'text' (hiển thị cho học sinh) và có thể có 'api_text'
+  (nội dung thật gửi cho AI, kèm bối cảnh/ghi chú hệ thống).
+  """
+  if len(history) > 2 + MAX_RECENT_MESSAGES:
+    history = history[:2] + history[-MAX_RECENT_MESSAGES:]
+  return [
+      {"role": m["role"], "parts": [{"text": m.get("api_text", m["text"])}]}
+      for m in history
+  ]
+
+
+def get_ai_reply(history):
+  """Gửi TOÀN BỘ cuộc trò chuyện cho AI để cô nhớ mọi lượt trước đó."""
+  contents = history_to_contents(history)
+  last_error = None
+  for m in CANDIDATE_MODELS:
     try:
       res = client.models.generate_content(
           model=m,
-          contents=full_user_context,
+          contents=contents,
           config={
               "system_instruction": SYSTEM_PROMPT,
               "max_output_tokens": 2500,
@@ -572,7 +611,30 @@ def get_ai_reply(prompt, grade, topic):
     except Exception as e:
       time.sleep(1)
       last_error = e
-  return None, last_error
+  return None, last_error or "AI không trả lời"
+
+
+def clean_reply(text):
+  """Bỏ các nhãn [PHAN_x: ...] nếu AI lỡ dùng trong lượt trò chuyện tiếp nối."""
+  for tag in (
+      "[PHAN_1: THẤU HIỂU & GỌI TÊN CẢM XÚC]",
+      "[PHAN_2: GÓC NHÌN ĐA CHIỀU]",
+      "[PHAN_3: KẾ HOẠCH HÀNH ĐỘNG TẠI TRƯỜNG PHAN ĐÌNH PHÙNG]",
+  ):
+    text = text.replace(tag, "")
+  return text.strip()
+
+
+def start_new_story():
+  """Xóa sạch cuộc trò chuyện hiện tại để con kể một câu chuyện mới."""
+  st.session_state["chat_history"] = []
+  st.session_state["raw_response"] = ""
+  st.session_state["has_new_reply"] = False
+  st.session_state["feedback"] = None
+  st.session_state["selected_emotion_prompt"] = ""
+  # Xóa nội dung đã gõ trong các ô nhập (chạy trước khi ô được vẽ lại)
+  st.session_state.pop("user_msg_input", None)
+  st.session_state["fu_counter"] = st.session_state.get("fu_counter", 0) + 1
 
 
 # NÚT GỬI TÂM SỰ
@@ -582,8 +644,15 @@ if st.button("💌 Gửi gắm tâm sự cùng Cô Tư Phùng", type="primary"):
   elif not client:
     st.error("Chưa kết nối được API Key trên Streamlit Cloud Secrets.")
   else:
+    first_turn = {
+        "role": "user",
+        "text": user_question,
+        "api_text": build_first_turn(
+            user_question, selected_grade, selected_topic
+        ),
+    }
     with st.spinner("Cô Tư Phùng đang lắng nghe và suy ngẫm cùng con..."):
-      reply, err = get_ai_reply(user_question, selected_grade, selected_topic)
+      reply, err = get_ai_reply([first_turn])
       if reply:
         # Đồng bộ tăng số lượng vào Google Sheet
         sync_to_sheet("total_questions")
@@ -595,13 +664,14 @@ if st.button("💌 Gửi gắm tâm sự cùng Cô Tư Phùng", type="primary"):
             stats["topics"].get(selected_topic, 0) + 1
         )
 
+        # Gửi tâm sự mới = bắt đầu một câu chuyện mới
         st.session_state["chat_history"] = [
-            {"role": "user", "text": user_question},
+            first_turn,
             {"role": "model", "text": reply},
         ]
         st.session_state["raw_response"] = reply
         st.session_state["has_new_reply"] = True
-        st.session_state["show_follow_up"] = False
+        st.session_state["feedback"] = None
       else:
         st.error(
             "Hệ thống đang nhiều bạn truy cập cùng lúc, con bấm gửi lại sau 3"
@@ -660,72 +730,100 @@ if st.session_state.get("has_new_reply", False):
   else:
     st.markdown(reply_text)
 
-  # KHẢO SÁT HỮU ÍCH & TRÒ CHUYỆN TIẾP NỐI
+  # KHẢO SÁT HỮU ÍCH (chỉ để thống kê, KHÔNG còn khóa phần trò chuyện)
   st.divider()
-  st.write("**Lời dặn dò của Cô Tư Phùng có giúp con nhẹ lòng hơn chưa?**")
-  c_btn1, c_btn2 = st.columns(2)
-  with c_btn1:
-    if st.button("👍 Dạ rồi, con đã thấy nhẹ lòng và bình tĩnh hơn"):
-      sync_to_sheet("helpful_yes")
-      stats["helpful_yes"] += 1
-      st.success("Thương con! Cố lên nhé, cô luôn ở bên cạnh đồng hành cùng con.")
-      st.session_state["show_follow_up"] = False
-  with c_btn2:
-    if st.button("👎 Con vẫn còn thấy lo lắng và bối rối..."):
-      sync_to_sheet("helpful_no")
-      stats["helpful_no"] += 1
-      st.session_state["show_follow_up"] = True
+  feedback = st.session_state.get("feedback")
+  if feedback is None:
+    st.write("**Lời dặn dò của Cô Tư Phùng có giúp con nhẹ lòng hơn chưa?**")
+    c_btn1, c_btn2 = st.columns(2)
+    with c_btn1:
+      if st.button("👍 Dạ rồi, con đã thấy nhẹ lòng và bình tĩnh hơn"):
+        sync_to_sheet("helpful_yes")
+        stats["helpful_yes"] += 1
+        st.session_state["feedback"] = "yes"
+        feedback = "yes"
+    with c_btn2:
+      if st.button("👎 Con vẫn còn thấy lo lắng và bối rối..."):
+        sync_to_sheet("helpful_no")
+        stats["helpful_no"] += 1
+        st.session_state["feedback"] = "no"
+        feedback = "no"
 
-  if st.session_state.get("show_follow_up", False):
+  if feedback == "yes":
+    st.success(
+        "Thương con! Cố lên nhé, cô luôn ở bên cạnh đồng hành cùng con. Nếu"
+        " còn điều gì muốn kể thêm, con cứ viết tiếp bên dưới nhé."
+    )
+  elif feedback == "no":
     st.info(
         "💡 **Đừng giữ trong lòng một mình nhé!** Con muốn cô giải thích rõ hơn"
-        " ở điểm nào, hoặc con sợ điều gì khi làm theo hướng dẫn?"
+        " ở điểm nào, hoặc con sợ điều gì khi làm theo hướng dẫn? Con viết tiếp"
+        " bên dưới cho cô nha."
     )
+
+  # CÁC LƯỢT TRÒ CHUYỆN TIẾP NỐI (hiện TRƯỚC ô nhập, giống khung chat)
+  history = st.session_state["chat_history"]
+  if len(history) > 2:
+    st.subheader("🗨️ Cuộc trò chuyện tiếp nối cùng Cô Tư Phùng:")
+    for msg in history[2:]:
+      if msg["role"] == "user":
+        with st.chat_message("user"):
+          st.write(msg["text"])
+      else:
+        with st.chat_message("assistant", avatar="🌱"):
+          st.markdown(clean_reply(msg["text"]))
+
+  # Ô TÂM SỰ TIẾP NỐI: LUÔN HIỆN sau khi cô đã trả lời, dù con bấm 👍, 👎
+  # hay không bấm gì. Ô chỉ được xóa khi gửi THÀNH CÔNG (lỗi mạng thì chữ
+  # của con vẫn còn để gửi lại).
+  fu_key = f"fu_text_{st.session_state.get('fu_counter', 0)}"
+  with st.form("follow_up_form"):
     follow_up_msg = st.text_area(
-        "Viết tiếp điều con băn khoăn:",
+        "💬 Con muốn kể thêm hay hỏi tiếp cô điều gì?",
         placeholder=(
             "Ví dụ: Nhưng cô ơi nếu con báo thầy Thành thì bạn biết bạn lại"
             " chặn đánh con thì sao ạ?"
         ),
-        key="fu_text",
+        key=fu_key,
     )
-    if st.button("Gửi tâm sự tiếp nối cho cô 💬"):
-      if not follow_up_msg.strip():
-        st.warning("Con ghi thêm câu hỏi nhé.")
-      else:
-        with st.spinner("Cô đang đọc tiếp tâm sự của con..."):
-          ctx = (
-              "LỊCH SỬ TÂM SỰ:\n"
-              f"{st.session_state['chat_history'][0]['text']}\n"
-              "LỜI DẶN TRƯỚC ĐÓ CỦA CÔ TƯ PHÙNG:\n"
-              f"{st.session_state['chat_history'][1]['text']}\n"
-              f"HỌC SINH HỎI TIẾP: {follow_up_msg}\n"
-              "YÊU CẦU: Xưng 'Cô' - gọi 'Con' (dùng 'Cô trò mình'). Chỉ rõ từng"
-              " bước bảo mật an toàn cho học sinh Phan Đình Phùng. Không tự ý"
-              " lôi chuyện đi biển vào."
-          )
-          sub_reply, sub_err = get_ai_reply(
-              ctx, selected_grade, selected_topic
-          )
-          if sub_reply:
-            st.session_state["chat_history"].append(
-                {"role": "user", "text": follow_up_msg}
-            )
-            st.session_state["chat_history"].append(
-                {"role": "model", "text": sub_reply}
-            )
-          else:
-            st.error(f"Lỗi kết nối: {sub_err}")
+    send_follow_up = st.form_submit_button("Gửi tâm sự tiếp nối cho cô 💬")
 
-  # Hiện các lượt trò chuyện sâu hơn
-  if len(st.session_state["chat_history"]) > 2:
-    st.markdown("---")
-    st.subheader("🗨️ Cuộc trò chuyện tiếp nối cùng Cô Tư Phùng:")
-    for i in range(2, len(st.session_state["chat_history"]), 2):
-      with st.chat_message("user"):
-        st.write(st.session_state["chat_history"][i]["text"])
-      with st.chat_message("assistant"):
-        st.write(st.session_state["chat_history"][i + 1]["text"])
+  if send_follow_up:
+    if not follow_up_msg.strip():
+      st.warning("Con ghi thêm câu hỏi nhé.")
+    elif not client:
+      st.error("Chưa kết nối được API Key trên Streamlit Cloud Secrets.")
+    else:
+      new_turn = {
+          "role": "user",
+          "text": follow_up_msg,
+          "api_text": follow_up_msg + FOLLOW_UP_REMINDER,
+      }
+      with st.spinner("Cô đang đọc tiếp tâm sự của con..."):
+        # Gửi TOÀN BỘ lịch sử + câu mới để cô không "quên" các lượt trước
+        sub_reply, sub_err = get_ai_reply(history + [new_turn])
+      if sub_reply:
+        history.append(new_turn)
+        history.append({"role": "model", "text": sub_reply})
+        # Đổi key để ô nhập trống trở lại
+        st.session_state["fu_counter"] = (
+            st.session_state.get("fu_counter", 0) + 1
+        )
+        st.rerun()  # vẽ lại để lượt mới hiện ngay trong khung chat
+      else:
+        st.error(
+            "Cô chưa nhận được tin của con, con bấm gửi lại sau vài giây nhé!"
+            f" (Lỗi: {sub_err})"
+        )
+
+  # NÚT BẮT ĐẦU CÂU CHUYỆN MỚI (không cần tải lại trang)
+  st.divider()
+  st.button(
+      "🌱 Bắt đầu câu chuyện mới",
+      on_click=start_new_story,
+      help="Xóa cuộc trò chuyện này để kể với cô một chuyện khác.",
+      use_container_width=True,
+  )
 
 # ----------------- 5. SIDEBAR: THỐNG KÊ & KHU VỰC DÀNH CHO THẦY CÔ -----------------
 with st.sidebar:
