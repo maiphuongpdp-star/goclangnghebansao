@@ -2,7 +2,6 @@ import base64
 from datetime import datetime
 import json
 import os
-import threading
 import time
 from google import genai
 import requests
@@ -16,13 +15,6 @@ st.set_page_config(
 )
 
 
-# [TĂNG TỐC] Đọc & mã hóa ảnh nền 1 lần rồi nhớ lại, không làm lại sau mỗi cú bấm
-@st.cache_data(show_spinner=False)
-def load_bg_base64(path):
-  with open(path, "rb") as f:
-    return base64.b64encode(f.read()).decode()
-
-
 # CÀI ĐẶT GIAO DIỆN NỀN VÀ KHUNG HIỂN THỊ CHỮ SIÊU ĐẬM - NÚT PASTEL
 def set_styling():
   bg_file = (
@@ -31,7 +23,9 @@ def set_styling():
       else ("school_bg.jpg" if os.path.exists("school_bg.jpg") else None)
   )
   if bg_file:
-    b64 = load_bg_base64(bg_file)
+    with open(bg_file, "rb") as f:
+      data = f.read()
+    b64 = base64.b64encode(data).decode()
     st.markdown(
         f"""
         <style>
@@ -191,9 +185,6 @@ TOPIC_KEY_MAP = {
 }
 
 
-# [TĂNG TỐC] Trước đây MỖI cú bấm đều chờ Google Sheet trả số liệu (tới 4 giây).
-# Nay chỉ hỏi Sheet tối đa 1 lần/60 giây, các lần khác dùng số đã nhớ.
-@st.cache_data(ttl=60, show_spinner=False)
 def load_stats():
   fallback_stats = {
       "total_questions": 5,
@@ -232,18 +223,13 @@ def load_stats():
   return fallback_stats
 
 
-def _post_to_sheet(key_name):
-  try:
-    requests.post(SHEETS_URL, json={"key": key_name}, timeout=10)
-  except Exception:
-    pass
-
-
 def sync_to_sheet(key_name):
-  """[TĂNG TỐC] Gửi số liệu lên Sheet ở luồng nền: con không phải chờ Sheet."""
   if not SHEETS_URL:
     return
-  threading.Thread(target=_post_to_sheet, args=(key_name,), daemon=True).start()
+  try:
+    requests.post(SHEETS_URL, json={"key": key_name}, timeout=3)
+  except Exception:
+    pass
 
 
 def load_sos_alerts():
@@ -293,7 +279,7 @@ II. HỒ SƠ THỰC TẾ & BỐI CẢNH ĐẶC THÙ TRƯỜNG THCS PHAN ĐÌNH P
 2. Gia cảnh học sinh ĐA DẠNG:
 - Khoảng 50% là con em ngư dân vùng biển Thanh Khê (cha mẹ đi biển dài ngày, sống cùng mẹ/ông bà).
 - 50% CÒN LẠI là con em các gia đình buôn bán, kinh doanh dịch vụ, công nhân viên chức đô thị bình thường.
-- NGUYÊN TẮC BẮT BUỘC VỀ GIA CẢNH: TUYỆT ĐỐI KHÔNG mặc định học sinh nào cũng có ba mẹ đi biển, ra khơi. CHỈ đề cập đến chuyện ba mẹ đi biển, ra khơi, bão gió đại dương KHI VÀ CHỈ KHI chính lời tâm sự của con có nhắc đến (ví dụ con viết "ba con đi biển", "mẹ đi bạn", "ba ra khơi chưa về"...). Việc con chọn nhóm "Áp lực điểm số / gia đình" KHÔNG có nghĩa là gia đình con đi biển: áp lực điểm số, sợ ba mẹ mắng phạt là chuyện của mọi gia đình (buôn bán, công nhân, viên chức...), hãy trả lời đúng chuyện điểm số và cách nói chuyện với ba mẹ, KHÔNG nhắc chuyện đi biển. Nếu con chỉ nói về chuyện bạn bè, tẩy chay, xích mích, HÃY TẬP TRUNG TRỌNG TÂM vào chuyện học đường và mối quan hệ bạn bè, không tự suy diễn gia cảnh con.
+- NGUYÊN TẮC BẮT BUỘC VỀ GIA CẢNH: TUYỆT ĐỐI KHÔNG mặc định học sinh nào cũng có ba mẹ đi biển, ra khơi. CHỈ đề cập đến chuyện ba mẹ đi biển, ra khơi, bão gió đại dương KHI VÀ CHỈ KHI chính lời tâm sự của con có nhắc đến (ví dụ con viết "ba con đi biển", "ba ra khơi chưa về"...). Việc con chọn nhóm "Áp lực điểm số / gia đình" KHÔNG có nghĩa là gia đình con đi biển: áp lực điểm số, sợ ba mẹ mắng phạt là chuyện của mọi gia đình (buôn bán, công nhân, viên chức...), hãy trả lời đúng chuyện điểm số và cách nói chuyện với ba mẹ, KHÔNG nhắc chuyện đi biển. Nếu con chỉ nói về chuyện bạn bè, tẩy chay, xích mích, HÃY TẬP TRUNG TRỌNG TÂM vào chuyện học đường và mối quan hệ bạn bè, không tự suy diễn gia cảnh con.
 
 3. Nhận diện từ lóng & ngôn ngữ tuổi teen THCS tại Đà Nẵng:
 - Từ ngữ bêu xấu/khiêu khích: "mõm", "ra cổng trường nói chuyện", "kèo", "gạ solo", "nhìn đểu", "chảnh chó", "phốt", "bóc phốt", "tẩy chay", "coi chừng tao", "tính sổ", "mày đợi đó".
@@ -571,7 +557,7 @@ FOLLOW_UP_REMINDER = (
 )
 
 
-# [SỬA] Tên nhóm vấn đề GỬI CHO AI (giao diện & thống kê vẫn giữ tên cũ).
+# Tên nhóm vấn đề GỬI CHO AI (giao diện & thống kê vẫn giữ tên cũ).
 # Bỏ chữ "đi biển" để AI không mặc định ba mẹ con đi biển khi con chọn nhóm này.
 TOPIC_LABEL_FOR_AI = {
     "Áp lực điểm số & Gia đình đi biển": "Áp lực điểm số / gia đình",
@@ -614,55 +600,26 @@ def history_to_contents(history):
   ]
 
 
-# Mức suy nghĩ của AI: None = để model tự dùng mặc định (suy nghĩ CAO, trả lời
-# chu đáo nhất nhưng chậm hơn). Có thể đổi thành "low" nếu cần nhanh hơn.
-THINKING_LEVEL = None
-
-
-def _gen_config(use_thinking):
-  cfg = {
-      "system_instruction": SYSTEM_PROMPT,
-      "max_output_tokens": 2500,
-      "temperature": 0.5,
-  }
-  if use_thinking and THINKING_LEVEL:
-    cfg["thinking_config"] = {"thinking_level": THINKING_LEVEL}
-  return cfg
-
-
-def get_ai_reply(history, placeholder=None):
-  """Gửi TOÀN BỘ cuộc trò chuyện cho AI để cô nhớ mọi lượt trước đó.
-
-  [TĂNG TỐC] Nếu có placeholder, chữ của cô hiện dần ngay khi AI vừa viết
-  (không phải chờ viết xong cả bài mới thấy).
-  """
+def get_ai_reply(history):
+  """Gửi TOÀN BỘ cuộc trò chuyện cho AI để cô nhớ mọi lượt trước đó."""
   contents = history_to_contents(history)
   last_error = None
   for m in CANDIDATE_MODELS:
-    for use_thinking in (True, False):
-      text = ""
-      try:
-        stream = client.models.generate_content_stream(
-            model=m, contents=contents, config=_gen_config(use_thinking)
-        )
-        for chunk in stream:
-          piece = getattr(chunk, "text", None)
-          if piece:
-            text += piece
-            if placeholder is not None:
-              placeholder.markdown(clean_reply(text) + " ▌")
-        if text:
-          return text, None
-        last_error = "AI không trả lời"
-        break  # model trả rỗng -> thử model khác
-      except Exception as e:
-        if text:
-          return text, None  # đứt giữa chừng: giữ phần cô đã viết
-        last_error = e
-        if use_thinking and "thinking" in str(e).lower():
-          continue  # model không hỗ trợ mức suy nghĩ -> gọi lại không kèm
-        time.sleep(0.5)
-        break
+    try:
+      res = client.models.generate_content(
+          model=m,
+          contents=contents,
+          config={
+              "system_instruction": SYSTEM_PROMPT,
+              "max_output_tokens": 2500,
+              "temperature": 0.5,
+          },
+      )
+      if res and res.text:
+        return res.text, None
+    except Exception as e:
+      time.sleep(1)
+      last_error = e
   return None, last_error or "AI không trả lời"
 
 
@@ -703,34 +660,32 @@ if st.button("💌 Gửi gắm tâm sự cùng Cô Tư Phùng", type="primary"):
             user_question, selected_grade, selected_topic
         ),
     }
-    live_box = st.empty()
-    live_box.info("🌱 Cô Tư Phùng đang lắng nghe và suy ngẫm cùng con...")
-    reply, err = get_ai_reply([first_turn], placeholder=live_box)
-    live_box.empty()  # xong thì xóa bản nháp, hiện lại gọn trong 3 tab bên dưới
-    if reply:
-      # Đồng bộ tăng số lượng vào Google Sheet
-      sync_to_sheet("total_questions")
-      sync_to_sheet(TOPIC_KEY_MAP.get(selected_topic, "topic_6"))
+    with st.spinner("Cô Tư Phùng đang lắng nghe và suy ngẫm cùng con..."):
+      reply, err = get_ai_reply([first_turn])
+      if reply:
+        # Đồng bộ tăng số lượng vào Google Sheet
+        sync_to_sheet("total_questions")
+        sync_to_sheet(TOPIC_KEY_MAP.get(selected_topic, "topic_6"))
 
-      # Cập nhật tạm thời cho lượt xem hiện tại
-      stats["total_questions"] += 1
-      stats["topics"][selected_topic] = (
-          stats["topics"].get(selected_topic, 0) + 1
-      )
+        # Cập nhật tạm thời cho lượt xem hiện tại
+        stats["total_questions"] += 1
+        stats["topics"][selected_topic] = (
+            stats["topics"].get(selected_topic, 0) + 1
+        )
 
-      # Gửi tâm sự mới = bắt đầu một câu chuyện mới
-      st.session_state["chat_history"] = [
-          first_turn,
-          {"role": "model", "text": reply},
-      ]
-      st.session_state["raw_response"] = reply
-      st.session_state["has_new_reply"] = True
-      st.session_state["feedback"] = None
-    else:
-      st.error(
-          "Hệ thống đang nhiều bạn truy cập cùng lúc, con bấm gửi lại sau 3"
-          f" giây nhé! (Lỗi: {err})"
-      )
+        # Gửi tâm sự mới = bắt đầu một câu chuyện mới
+        st.session_state["chat_history"] = [
+            first_turn,
+            {"role": "model", "text": reply},
+        ]
+        st.session_state["raw_response"] = reply
+        st.session_state["has_new_reply"] = True
+        st.session_state["feedback"] = None
+      else:
+        st.error(
+            "Hệ thống đang nhiều bạn truy cập cùng lúc, con bấm gửi lại sau 3"
+            f" giây nhé! (Lỗi: {err})"
+        )
 
 # HIỂN THỊ PHẢN HỒI GÓC NHÌN 3 CHIỀU TỪ CÔ TƯ PHÙNG
 if st.session_state.get("has_new_reply", False):
@@ -784,6 +739,37 @@ if st.session_state.get("has_new_reply", False):
   else:
     st.markdown(reply_text)
 
+  # KHẢO SÁT HỮU ÍCH (chỉ để thống kê, KHÔNG còn khóa phần trò chuyện)
+  st.divider()
+  feedback = st.session_state.get("feedback")
+  if feedback is None:
+    st.write("**Lời dặn dò của Cô Tư Phùng có giúp con nhẹ lòng hơn chưa?**")
+    c_btn1, c_btn2 = st.columns(2)
+    with c_btn1:
+      if st.button("👍 Dạ rồi, con đã thấy nhẹ lòng và bình tĩnh hơn"):
+        sync_to_sheet("helpful_yes")
+        stats["helpful_yes"] += 1
+        st.session_state["feedback"] = "yes"
+        feedback = "yes"
+    with c_btn2:
+      if st.button("👎 Con vẫn còn thấy lo lắng và bối rối..."):
+        sync_to_sheet("helpful_no")
+        stats["helpful_no"] += 1
+        st.session_state["feedback"] = "no"
+        feedback = "no"
+
+  if feedback == "yes":
+    st.success(
+        "Thương con! Cố lên nhé, cô luôn ở bên cạnh đồng hành cùng con. Nếu"
+        " còn điều gì muốn kể thêm, con cứ viết tiếp bên dưới nhé."
+    )
+  elif feedback == "no":
+    st.info(
+        "💡 **Đừng giữ trong lòng một mình nhé!** Con muốn cô giải thích rõ hơn"
+        " ở điểm nào, hoặc con sợ điều gì khi làm theo hướng dẫn? Con viết tiếp"
+        " bên dưới cho cô nha."
+    )
+
   # CÁC LƯỢT TRÒ CHUYỆN TIẾP NỐI (hiện TRƯỚC ô nhập, giống khung chat)
   history = st.session_state["chat_history"]
   if len(history) > 2:
@@ -822,13 +808,9 @@ if st.session_state.get("has_new_reply", False):
           "text": follow_up_msg,
           "api_text": follow_up_msg + FOLLOW_UP_REMINDER,
       }
-      with st.chat_message("user"):
-        st.write(follow_up_msg)
-      with st.chat_message("assistant", avatar="🌱"):
-        live_fu = st.empty()
-        live_fu.markdown("*Cô đang đọc tiếp tâm sự của con...*")
+      with st.spinner("Cô đang đọc tiếp tâm sự của con..."):
         # Gửi TOÀN BỘ lịch sử + câu mới để cô không "quên" các lượt trước
-        sub_reply, sub_err = get_ai_reply(history + [new_turn], placeholder=live_fu)
+        sub_reply, sub_err = get_ai_reply(history + [new_turn])
       if sub_reply:
         history.append(new_turn)
         history.append({"role": "model", "text": sub_reply})
@@ -851,37 +833,6 @@ if st.session_state.get("has_new_reply", False):
       help="Xóa cuộc trò chuyện này để kể với cô một chuyện khác.",
       use_container_width=True,
   )
-
-  # KHẢO SÁT HỮU ÍCH - ĐẶT DƯỚI CÙNG APP (chỉ để thống kê, không khóa phần trò chuyện)
-  st.divider()
-  feedback = st.session_state.get("feedback")
-  if feedback is None:
-    st.write("**Lời dặn dò của Cô Tư Phùng có giúp con nhẹ lòng hơn chưa?**")
-    c_btn1, c_btn2 = st.columns(2)
-    with c_btn1:
-      if st.button("👍 Dạ rồi, con đã thấy nhẹ lòng và bình tĩnh hơn"):
-        sync_to_sheet("helpful_yes")
-        stats["helpful_yes"] += 1
-        st.session_state["feedback"] = "yes"
-        feedback = "yes"
-    with c_btn2:
-      if st.button("👎 Con vẫn còn thấy lo lắng và bối rối..."):
-        sync_to_sheet("helpful_no")
-        stats["helpful_no"] += 1
-        st.session_state["feedback"] = "no"
-        feedback = "no"
-
-  if feedback == "yes":
-    st.success(
-        "Thương con! Cố lên nhé, cô luôn ở bên cạnh đồng hành cùng con. Nếu"
-        " còn điều gì muốn kể thêm, con cứ viết tiếp vào ô phía trên nhé."
-    )
-  elif feedback == "no":
-    st.info(
-        "💡 **Đừng giữ trong lòng một mình nhé!** Con muốn cô giải thích rõ hơn"
-        " ở điểm nào, hoặc con sợ điều gì khi làm theo hướng dẫn? Con viết tiếp"
-        " vào ô phía trên cho cô nha."
-    )
 
 # ----------------- 5. SIDEBAR: THỐNG KÊ & KHU VỰC DÀNH CHO THẦY CÔ -----------------
 with st.sidebar:
